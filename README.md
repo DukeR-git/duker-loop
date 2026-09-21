@@ -34,15 +34,34 @@ pi install git:github.com/DukeR-git/duker-loop      # or: pi install /path/to/du
 ```
 
 A local-path install is a link, so edits are live after `/reload`. `pi list` shows it,
-`pi remove <source>` uninstalls. Then `/duker agents` in pi should list the seven agents.
+`pi remove <source>` uninstalls. Then `/duker agents` in pi should list the eight agents.
 
 ## Usage
 
-Write a `Full_Plan.md` in the project root: free-form markdown with **numbered items** (e.g.
-`1.1`, `1.2`) grouped into phases, each item saying what must exist when it is done. Commit it.
-Then:
+Open pi in the project and run `/duker init`. It checks the prerequisites and makes the project
+ready for the loop:
+
+- the agent files load and `git` is on `PATH`; `git init` if the directory is not a repository;
+- no half-finished step is lying around (leftover `CURRENT_PLAN.md`/`ISSUES.md`/… and
+  `.duker/state.json` — you are asked before they are discarded, code changes stay);
+- `Full_Plan.md` exists and is in the loop's format: free-form markdown with **numbered items**
+  (`1.1`, `1.2`, …) grouped into phases, each item saying what must exist when it is done. When
+  it is missing or not in that format, the **plan-writer** agent writes it: from an existing plan
+  document (`PLAN.md`, `ROADMAP.md`, `docs/*plan*.md`, … — or any file you name with
+  `/duker init <path>`), or, when there is nothing to convert, from a description of the project
+  you type into an editor dialog. It drafts `Full_Plan.draft.md`, code validates it, and only then
+  is it moved into place; a replaced plan is kept as `Full_Plan.md.bak`;
+- `Current_State.md` exists;
+- the plan files are committed (`duker: init`; in a fresh repository the whole tree) and the
+  working tree is clean, because a new step refuses to start on a dirty tree.
+
+Every check is printed with ✓ / ! / ✗ and the report ends with "ready" or the list of what still
+blocks the loop. Without a TUI (`-p` mode) `init` never asks and never discards or overwrites
+anything; it just reports. If you would rather write `Full_Plan.md` by hand, `init` validates it
+and leaves it alone. Then:
 
 ```
+/duker init [plan file]   prepare the project (see above); optional: the document to convert
 /duker            run one Full_Plan step
 /duker 3          run up to three steps
 /duker status     show the current step / phase / round and which artifacts exist
@@ -116,7 +135,10 @@ try a change.
 
 The bundled defaults: orchestrator, reporter, and state-updater are cheap and narrow; the planner
 and reviewer think hard; the implementer may write anything except the loop's own files; the
-tester may only write `ISSUES.md` and test paths.
+tester may only write `ISSUES.md` and test paths. The eighth agent, **plan-writer**, is not part
+of the loop: `/duker init` runs it to turn a plan document or a project description into
+`Full_Plan.draft.md` (the only file it may write); its system prompt spells out the plan format
+and the rules for good steps (small, concrete, ordered by dependency, ending in `Done when:`).
 
 ### Artifact contracts
 
@@ -134,7 +156,7 @@ orchestrator       STEP: <id> | NONE | BLOCKED  /  TITLE:  /  DESCRIPTION:  /  R
 ## Development
 
 ```bash
-npm test                    # 43 tests: parsers, guard, state, and the whole loop driven by a fake pi
+npm test                    # 58 tests: parsers, guard, state, /duker init, and the whole loop driven by a fake pi
 npm run test:unit           # just the parsers/guard/state tests
 npm run typecheck           # needs the pi packages resolvable (e.g. a node_modules with them)
 npm run typecheck:container # inside a container with pi installed globally and typescript/@types/node under ~/.npm-global

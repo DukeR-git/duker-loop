@@ -129,12 +129,13 @@ test("command: routing, status, clean, agents", async () => {
 	const titles = () => reg.entries.map((e) => e.data.title);
 
 	assert.deepEqual(await cmd.getArgumentCompletions!("a"), [{ value: "agents", label: "agents" }, { value: "abort", label: "abort" }]);
+	assert.deepEqual(await cmd.getArgumentCompletions!("i"), [{ value: "init", label: "init" }]);
 	await cmd.handler("bogus", c);
 	assert.match(reg.entries.at(-1)!.data.body, /usage: \/duker/);
 
 	await cmd.handler("agents", c);
-	assert.match(reg.entries.at(-1)!.data.title, /7 agent\(s\)/);
-	assert.match(reg.entries.at(-1)!.data.body, /orchestrator[\s\S]*state-updater/);
+	assert.match(reg.entries.at(-1)!.data.title, /8 agent\(s\)/);
+	assert.match(reg.entries.at(-1)!.data.body, /orchestrator[\s\S]*state-updater[\s\S]*plan-writer/);
 
 	await cmd.handler("status", c);
 	assert.match(reg.entries.at(-1)!.data.body, /no step in progress/);
@@ -157,6 +158,69 @@ test("command: routing, status, clean, agents", async () => {
 	assert.match(reg.entries.at(-1)!.data.body, /deleted CURRENT_PLAN\.md[\s\S]*deleted .*state\.json/);
 	await cmd.handler("status", c);
 	assert.match(reg.entries.at(-1)!.data.body, /no step in progress/);
+});
+
+test("command: init — usage, non-interactive report, interactive conversion through ctx.ui, registry", async () => {
+	const cwd = project();
+	useFakePi();
+	const cmd = reg.commands.duker;
+	const body = () => reg.entries.at(-1)!.data.body as string;
+	const title = () => reg.entries.at(-1)!.data.title as string;
+
+	await cmd.handler("init a b", ctx(cwd));
+	assert.match(body(), /usage: \/duker init \[plan file\]/);
+
+	// already a valid, committed project → ready; Current_State.md gets created and committed
+	await cmd.handler("init", ctx(cwd));
+	assert.equal(title(), "duker init — ready", body());
+	assert.match(body(), /✓ Full_Plan\.md: 2 steps in 1 phase/);
+	assert.match(body(), /✓ Current_State\.md: created/);
+	assert.match(body(), /✓ git commit: [0-9a-f]{10} "duker: init"/);
+	assert.match(body(), /ready — run \/duker/);
+
+	// malformed plan without a UI → reported, untouched
+	fs.writeFileSync(path.join(cwd, "Full_Plan.md"), "prose only\n");
+	await cmd.handler("init", ctx(cwd));
+	assert.equal(title(), "duker init — not ready");
+	assert.match(body(), /not in the loop's format/);
+	assert.match(body(), /run \/duker init interactively/);
+	assert.equal(fs.readFileSync(path.join(cwd, "Full_Plan.md"), "utf8"), "prose only\n");
+
+	// with a UI: the confirm dialog is wired to ctx.ui and the plan-writer rewrites the plan
+	const dialogs: string[] = [];
+	const notifications: string[] = [];
+	const statuses: (string | undefined)[] = [];
+	const uiCtx = {
+		...ctx(cwd),
+		hasUI: true,
+		ui: {
+			setStatus: (_k: string, t: string | undefined) => statuses.push(t),
+			notify: (t: string) => notifications.push(t),
+			confirm: async (t: string) => (dialogs.push(t), true),
+			select: async () => undefined,
+			editor: async () => undefined,
+		},
+	};
+	fs.writeFileSync(path.join(cwd, "Full_Plan.md"), "# Old\n- make it work\n- make it fast\n");
+	await cmd.handler("init", uiCtx);
+	assert.deepEqual(dialogs, ["Replace Full_Plan.md?"]);
+	assert.equal(title(), "duker init — ready", body());
+	assert.match(body(), /written from Full_Plan\.md: 2 steps in 1 phase\(s\); previous kept as Full_Plan\.md\.bak/);
+	assert.match(body(), /plan-writer: Wrote Full_Plan\.draft\.md/);
+	assert.match(fs.readFileSync(path.join(cwd, "Full_Plan.md"), "utf8"), /- 1\.1 make it work/);
+	assert.ok(statuses.some((s) => s?.startsWith("duker init · plan-writer")), statuses.join(" | "));
+	assert.equal(statuses.at(-1), undefined, "status cleared");
+	assert.deepEqual(notifications, ["duker init — ready"]);
+
+	// init shares the run registry with the loop
+	const ac = new AbortController();
+	const running = reg.tools.duker_loop.execute("tc-init", { steps: 1 }, ac.signal, undefined, ctx(cwd));
+	await new Promise((r) => setTimeout(r, 50));
+	await cmd.handler("init", ctx(cwd));
+	assert.match(body(), /already running/);
+	ac.abort();
+	await assert.rejects(running, /aborted/);
+	await cmd.handler("clean", ctx(cwd));
 });
 
 test("entry renderer returns a Text component", () => {

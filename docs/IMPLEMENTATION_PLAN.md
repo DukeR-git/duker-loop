@@ -43,6 +43,7 @@ layout, the contracts between agents, and the build/verification order.
 | 30 | Blocked step | Orchestrator skips ahead within the same phase to an item whose dependencies are met; if none, returns `BLOCKED` and the loop halts. |
 | 31 | Snapshot | `git rev-parse HEAD` recorded in state at SELECT. No `/duker revert` in v1. |
 | 32 | Milestone line | `- [DONE] 1.3 — Deliverable Routing (2026-09-13)`; sha lives only in the commit message. |
+| 33 | `/duker init` | Code-driven preflight that makes a project loop-ready (`init.ts`): agents, git on PATH / `git init`, leftover step (confirm → `/duker clean` semantics), `Full_Plan.md` format check (`checkPlanFormat`: ≥ 2 dotted ids, no duplicates), `Current_State.md`, commit `duker: init` (whole tree when the repo is fresh, else only the plan files), dirty-tree report. A missing or malformed plan is written by the optional eighth agent **plan-writer** from a plan document (known names in `.`/`docs/`, `/duker init <path>`, or a select dialog) or from a description typed into `ctx.ui.editor`. The guard's global `Full_Plan.md` deny stays: the agent writes `Full_Plan.draft.md`, code validates and renames it; the old plan becomes `Full_Plan.md.bak` (both git-excluded). Every overwrite/discard needs a `ctx.ui.confirm`; without a UI init only reports. Dialogs go through an `InitPrompter` interface so the tests script them. |
 
 No open decisions remain; §11 lists things that must be verified inside the container.
 
@@ -106,6 +107,7 @@ duker-loop/                (pi package root)
 │       ├── runtime.ts      getPiInvocation, spawn, JSONL parsing, timeout, abort, log writer
 │       ├── prompts.ts      task-prompt builders per phase (what goes into the positional arg)
 │       ├── loop.ts         runLoop(): state machine, resume, rounds, halt, cleaner, commit
+│       ├── init.ts         runInit(): /duker init preflight, plan conversion via plan-writer, git init/commit
 │       ├── state.ts        .duker/state.json load/save/clear (atomic write)
 │       ├── git.ts          isGitRepo, isDirty, ensureExcluded(".duker/"), commitAll
 │       └── render.ts       formatters, renderCall / renderResult
@@ -201,7 +203,7 @@ writeDeny: ["Full_Plan.md", "Current_State.md", ".duker/**"]  # optional; always
 
 Body = system prompt, appended to pi's default system prompt (`--append-system-prompt <tmpfile>`).
 
-### 4.2 The seven agents
+### 4.2 The seven loop agents (+ plan-writer for `/duker init`)
 
 | Agent | Tools | thinking | writeAllow | Task prompt receives | Output contract |
 |---|---|---|---|---|---|
@@ -212,6 +214,7 @@ Body = system prompt, appended to pi's default system prompt (`--append-system-p
 | reviewer | read, grep, find, ls, bash | high | `ISSUES.md` | plan file name; `git diff <headAtStepStart>` as the review material (or the plan's file list when not a git repo) | appends `[OPEN] (reviewer)` entries; final text = `Verdict: BLOCK \| OK \| OK with notes` |
 | reporter | read | high | `CURRENT_REPORT.md` | none | writes report with `VERDICT:` line 1 |
 | state-updater | read, grep, find, ls | low | `Current_State.md` | step id, title, today's date | appends `- [DONE] <id> — <title> (<date>)` under `## Milestones` + updates prose sections describing the codebase |
+| plan-writer (init only) | read, grep, find, ls, bash(read-only use), write | high | `Full_Plan.draft.md` | the plan document to convert, or the project description | writes the draft in the `## Phase N — name` / `- N.M Title: … Done when: …` structure; final text = one-paragraph summary (phases, steps, what was dropped/assumed) |
 
 `extensions`/`skills` per agent are left empty in the first version except where you decide
 otherwise (e.g. `implementer: extensions: [npm:pi-mcp-adapter]` for documentation lookup).
@@ -421,6 +424,7 @@ Each stage is testable inside the container before the next begins.
 | 6 tool + rendering | done | `tool.ts` (`duker_loop {steps?, cwd?}`, blocking, `onUpdate` snapshots, `usage` mapped to pi's `Usage`, halt/abort → thrown error with the summary, shared run registry with the command) and `render.ts` (`renderCall`, collapsed/expanded/partial `renderResult`, transcript formatting). Mock-API tests: pass/halt/busy/abort/`@cwd`, renderers return real pi-tui components. Bug found: partial `details` shared arrays with later updates → snapshots now copied. |
 
 | publish prep | done | Integration tests moved into the repo (`test/integration`, fake pi + stub loader → runs without pi, 43 tests on Windows and Linux), `.gitignore`, `docs/`, portable `tsconfig.json` + `tsconfig.container.json`, README rewritten for external readers. `DUKER_PI_BIN` may name a JS file (run via the current node). |
+| 9 `/duker init` | done | `init.ts` + `agents/plan-writer.md` + `checkPlanFormat` (decision #33). 12 integration scenarios with a scripted prompter and the fake pi playing the plan-writer (plain dir → git init + commit; idempotent; candidate confirm / select / editor description; malformed plan replaced with `.bak`, only plan files committed in an existing repo; declined / non-interactive → untouched; bad or missing draft → draft kept, not ready; half-finished step discard vs. freeze; agents dir without plan-writer), plus command-surface coverage through `ctx.ui`. Not yet exercised against a live model. |
 | 8 `pi install` | done | `pi install /opt/duker-loop` links the mounted package (`packages: ["/opt/duker-loop"]`); the `extensions` settings path was removed; the model lists `duker_loop` exactly once with no load errors. |
 | 6/7 live parent (`pi --mode json -p`) | done | Asked the parent Qwen model to "advance the plan by one step"; it called `duker_loop {steps:1}` (with pi-subagents' `subagent` also available). Clean step, 0 fix rounds, 3m40s, commit + milestone, `onUpdate` partials visible as `tool_execution_update`, child usage (118k total tokens) recorded on the toolResult message, parent replied with step/verdict/commit. Non-interactive mode works (`ctx.hasUI=false`). |
 

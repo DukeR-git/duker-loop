@@ -8,6 +8,7 @@ import { Text } from "@earendil-works/pi-tui";
 import * as path from "node:path";
 import { bundledAgentsDir, discoverAgents, findAgent, formatAgentList } from "./agents.ts";
 import { artifactExists, cleanTempArtifacts, parseIssues, parseVerdict, readArtifact } from "./artifacts.ts";
+import { formatInitResult, type InitPrompter, runInit } from "./init.ts";
 import { type ProgressSink, runLoop } from "./loop.ts";
 import { formatLoopSummary, formatPhase, formatStepLine } from "./render.ts";
 import { ChildAbortedError, formatDuration, isFailedResult, killAllChildren, resultErrorText, runChild } from "./runtime.ts";
@@ -67,14 +68,16 @@ export default function (pi: ExtensionAPI) {
 	registerDukerTool(pi, { registry, baseOptions: (ctx) => baseOptions(pi, ctx) });
 
 	pi.registerCommand("duker", {
-		description: "Run the duker loop: /duker [n] | status | clean | abort | agents | run <agent> <task>",
+		description: "Run the duker loop: /duker [n] | init [plan file] | status | clean | abort | agents | run <agent> <task>",
 		getArgumentCompletions: (prefix) =>
-			["agents", "run", "status", "clean", "abort"]
+			["init", "agents", "run", "status", "clean", "abort"]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
 			const [sub = "", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			switch (sub) {
+				case "init":
+					return cmdInit(pi, ctx, rest);
 				case "agents":
 					return cmdAgents(pi, ctx);
 				case "run":
@@ -88,7 +91,7 @@ export default function (pi: ExtensionAPI) {
 				default: {
 					const n = sub === "" ? 1 : Number(sub);
 					if (!Number.isInteger(n) || n < 1 || rest.length) {
-						return note(pi, ctx, "duker", "usage: /duker [n] | status | clean | abort | agents | run <agent> <task>");
+						return note(pi, ctx, "duker", "usage: /duker [n] | init [plan file] | status | clean | abort | agents | run <agent> <task>");
 					}
 					return cmdLoop(pi, ctx, n);
 				}
@@ -201,6 +204,51 @@ function cmdStatus(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
 		lines.push(`CURRENT_REPORT.md: VERDICT ${v.verdict}${v.found ? "" : " (no verdict line found)"}`);
 	}
 	note(pi, ctx, "duker status", lines.join("\n"));
+}
+
+/**
+ * Prepare a project for the loop: prerequisites, leftovers, Full_Plan.md (converted or drafted by
+ * the plan-writer when needed), Current_State.md, git init + commit. Dialogs need the TUI;
+ * without it nothing is discarded or overwritten.
+ */
+async function cmdInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: string[]) {
+	if (rest.length > 1) return note(pi, ctx, "duker init", "usage: /duker init [plan file]");
+	const controller = new AbortController();
+	const busy = registry.acquire("command", controller);
+	if (busy) return note(pi, ctx, "duker init", busy);
+	const ui: InitPrompter | undefined = ctx.hasUI
+		? {
+				confirm: (title, message) => ctx.ui.confirm(title, message),
+				select: (title, options) => ctx.ui.select(title, options),
+				editor: (title, prefill) => ctx.ui.editor(title, prefill),
+			}
+		: undefined;
+	const setStatus = (t: string | undefined) => ctx.hasUI && ctx.ui.setStatus(STATUS_KEY, t);
+	setStatus("duker init ⏳");
+	try {
+		const result = await runInit({
+			cwd: ctx.cwd,
+			planPath: rest[0],
+			ui,
+			inheritModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+			inheritThinking: ctx.thinkingLevel,
+			childTimeoutMinutes: numberFlag(pi, "duker-child-timeout", 0),
+			signal: controller.signal,
+			onProgress: setStatus,
+		});
+		const title = result.ready ? "duker init — ready" : "duker init — not ready";
+		note(pi, ctx, title, formatInitResult(result));
+		if (ctx.hasUI) ctx.ui.notify(title, result.ready ? "info" : "warning");
+	} catch (err) {
+		if (err instanceof ChildAbortedError) note(pi, ctx, "duker init", "aborted while the plan-writer was running; nothing was replaced");
+		else {
+			note(pi, ctx, "duker init: error", (err as Error).message);
+			if (ctx.hasUI) ctx.ui.notify(`duker init: ${(err as Error).message}`, "error");
+		}
+	} finally {
+		registry.release();
+		setStatus(undefined);
+	}
 }
 
 /** Discard a half-finished step: temp artifacts + state file. Logs under .duker/runs stay. */

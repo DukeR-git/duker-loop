@@ -3,7 +3,7 @@
  * files themselves; the prompt only tells them which step, which files, and which mode.
  * Every prompt starts with "Task:" so it can never be mistaken for a CLI flag.
  */
-import { ARTIFACTS } from "./types.ts";
+import { ARTIFACTS, PLAN_DRAFT } from "./types.ts";
 
 const ISSUE_FORMAT = `Entries in ${ARTIFACTS.issues} must be exactly \`- [OPEN|FIXED|NOTE] (author) <file:line> — <text>\`, one per line, details indented by two spaces.`;
 
@@ -90,6 +90,30 @@ export function stateUpdaterPrompt(step: StepRef, date: string): string {
 		`Task: record step ${step.id} — ${step.title} as done in ${ARTIFACTS.currentState}.`,
 		`Today's date: ${date}. Append exactly \`- [DONE] ${step.id} — ${step.title} (${date})\` under "## Milestones", then update the prose sections describing the codebase to reflect what the step changed.`,
 		`Read ${ARTIFACTS.currentPlan}, ${ARTIFACTS.report}, ${ARTIFACTS.fixingPlan} (if present) and the touched code to describe what now exists. Do not modify any other file.`,
+	].join("\n");
+}
+
+/** What /duker init hands the plan-writer: a document to convert or a description to plan from. */
+export type PlanSource = { kind: "file"; path: string } | { kind: "description"; text: string };
+
+export function planWriterPrompt(source: PlanSource): string {
+	const common = [
+		`Investigate the codebase first (layout, language, build/test commands, what already exists), then write ${PLAN_DRAFT} in the required structure: phases as \`## Phase N — name\`, one bullet per step starting with \`- <phase>.<item> <Title>:\`, each ending with a \`Done when:\` criterion.`,
+		`Write only ${PLAN_DRAFT}; do not modify any other file. Finish with the one-paragraph summary from your instructions.`,
+	];
+	if (source.kind === "file") {
+		return [
+			`Task: convert the existing plan document \`${source.path}\` into ${PLAN_DRAFT}.`,
+			`Read \`${source.path}\` in full. Keep its intent and ordering; drop what is already implemented, merge duplicates, split oversized items, and renumber everything into the <phase>.<item> scheme.`,
+			...common,
+		].join("\n");
+	}
+	return [
+		`Task: write ${PLAN_DRAFT} — a phased, numbered roadmap for this project — from the description below.`,
+		...common,
+		"",
+		"Project description:",
+		source.text.trim(),
 	].join("\n");
 }
 

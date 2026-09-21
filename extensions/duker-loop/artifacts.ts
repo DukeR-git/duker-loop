@@ -12,6 +12,7 @@ import {
 	type OrchestratorStep,
 	type ParsedIssues,
 	type ParsedVerdict,
+	type PlanCheck,
 	TEMP_ARTIFACTS,
 } from "./types.ts";
 
@@ -244,4 +245,53 @@ export function parseMilestones(text: string | undefined): { id: string; title: 
 export function milestoneLine(id: string, title: string, date = new Date()): string {
 	const d = date.toISOString().slice(0, 10);
 	return `- [DONE] ${id} — ${title} (${d})`;
+}
+
+// `- 1.2 Title: text` / `### 1.2 Title` / `1.2. Title` / `- **1.2** Title` / `- Step 1.2 — Title`
+const PLAN_ITEM_RE = /^\s*(?:[-*+]\s+|#{1,6}\s+|\d+\.\s+)?(?:\*\*|`)?(?:step\s+)?(\d+(?:\.\d+)+)[a-z]?(?:\*\*|`)?(?:[.:)\s—–-]|$)/i;
+// `## Phase 1 — name` / `# 2. name`; a heading carrying a dotted id (`### 1.2 Title`) is a step, not a phase
+const PLAN_PHASE_RE = /^\s*#{1,6}\s+(?:phase|milestone|stage|part|epic)?\s*\d+(?!\.\d)(?:\D|$)/i;
+const PLAN_MIN_ITEMS = 2;
+
+/**
+ * Does a plan look like something the orchestrator can drive? The contract (README, decision
+ * #24) is loose — free-form markdown with numbered items — so this only checks for dotted step
+ * ids (`1.1`, `2.3.1`) at line starts. Plain `1.` / `2.` lists do not count: they carry no
+ * phase and the orchestrator's dependency rules are phrased in terms of `<phase>.<item>`.
+ */
+export function checkPlanFormat(text: string | undefined): PlanCheck {
+	const check: PlanCheck = { ok: false, ids: [], phases: 0, problems: [], warnings: [] };
+	if (!text || !text.trim()) {
+		check.problems.push("file is empty");
+		return check;
+	}
+	const lines = text.split(LINE_SPLIT);
+	let inFence = false;
+	for (const line of lines) {
+		if (/^\s*(```|~~~)/.test(line)) {
+			inFence = !inFence;
+			continue;
+		}
+		if (inFence) continue;
+		if (PLAN_PHASE_RE.test(line)) check.phases++;
+		const m = PLAN_ITEM_RE.exec(line);
+		if (m) check.ids.push(m[1]!);
+	}
+	const plainNumbered = lines.filter((l) => /^\s*(?:[-*]\s+)?\d+[.)]\s+\S/.test(l) && !PLAN_ITEM_RE.test(l)).length;
+	if (check.ids.length === 0) {
+		check.problems.push(
+			plainNumbered
+				? `no dotted step ids (\`1.1\`, \`1.2\`, …); found ${plainNumbered} plain \`1.\`-style item(s) without a phase`
+				: "no numbered step items (expected lines like `- 1.1 Title: what must exist when done`)",
+		);
+	} else if (check.ids.length < PLAN_MIN_ITEMS) {
+		check.problems.push(`only ${check.ids.length} numbered step item(s); a plan needs at least ${PLAN_MIN_ITEMS}`);
+	}
+	const seen = new Set<string>();
+	const dupes = new Set<string>();
+	for (const id of check.ids) (seen.has(id) ? dupes : seen).add(id);
+	if (dupes.size) check.problems.push(`duplicate step id(s): ${[...dupes].join(", ")}`);
+	if (check.ids.length && check.phases === 0) check.warnings.push("no phase headings (e.g. `## Phase 1 — Foundations`); the orchestrator groups steps by the first id component instead");
+	check.ok = check.problems.length === 0;
+	return check;
 }

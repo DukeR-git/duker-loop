@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
 	artifactExists,
 	artifactFingerprint,
+	checkPlanFormat,
 	cleanTempArtifacts,
 	ensureCurrentState,
 	ensureIssuesFile,
@@ -219,4 +220,48 @@ test("file helpers: ensure/clean/fingerprint", () => {
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+// ---------------------------------------------------------------------------------------------
+// Full_Plan.md format check (/duker init)
+// ---------------------------------------------------------------------------------------------
+
+test("checkPlanFormat: accepts the documented shapes", () => {
+	const good = [
+		"# Plan\n\n## Phase 1 — Base\n- 1.1 First: create a\n- 1.2 Second: create b (after 1.1)\n\n## Phase 2 — More\n- 2.1 Third: create c\n",
+		"### 1.1 First\ntext\n### 1.2 Second\ntext\n",
+		"1. 1.1 First\n2. 1.2 Second\n",
+		"- **1.1** First\n- **1.2** Second\n",
+		"- Step 1.1 — First\n- Step 1.2 — Second\n",
+		"* 1.1: First\n* 2.3.1: Deep\n",
+	];
+	for (const text of good) {
+		const c = checkPlanFormat(text);
+		assert.equal(c.ok, true, `${JSON.stringify(text)} → ${c.problems.join("; ")}`);
+		assert.ok(c.ids.length >= 2, text);
+	}
+	const c = checkPlanFormat(good[0]);
+	assert.deepEqual(c.ids, ["1.1", "1.2", "2.1"]);
+	assert.equal(c.phases, 2);
+	assert.deepEqual(c.warnings, []);
+	assert.deepEqual(checkPlanFormat(good[1]).ids, ["1.1", "1.2"]);
+	assert.match(checkPlanFormat(good[1]).warnings[0] ?? "", /no phase headings/);
+});
+
+test("checkPlanFormat: rejects plain lists, empty, single item, duplicates, fenced ids", () => {
+	assert.deepEqual(checkPlanFormat(undefined).problems, ["file is empty"]);
+	assert.deepEqual(checkPlanFormat("  \n").problems, ["file is empty"]);
+	const plain = checkPlanFormat("# Todo\n1. build it\n2. test it\n3) ship it\n");
+	assert.equal(plain.ok, false);
+	assert.match(plain.problems[0]!, /no dotted step ids.*3 plain/);
+	const prose = checkPlanFormat("# Idea\nWe should build a thing.\n");
+	assert.match(prose.problems[0]!, /no numbered step items/);
+	const one = checkPlanFormat("- 1.1 Only one\n");
+	assert.match(one.problems[0]!, /only 1 numbered/);
+	const dup = checkPlanFormat("- 1.1 a\n- 1.1 b\n- 1.2 c\n");
+	assert.equal(dup.ok, false);
+	assert.match(dup.problems[0]!, /duplicate step id\(s\): 1\.1/);
+	const fenced = checkPlanFormat("# Doc\n```\n- 1.1 in a fence\n- 1.2 also\n```\n");
+	assert.equal(fenced.ok, false);
+	assert.deepEqual(fenced.ids, []);
 });

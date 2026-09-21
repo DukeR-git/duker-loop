@@ -34,7 +34,7 @@ export function registerDukerTool(pi: ExtensionAPI, deps: ToolDeps): void {
 		description: [
 			`Runs the duker delivery loop on the project: reads ${ARTIFACTS.fullPlan} and ${ARTIFACTS.currentState}, selects the next undone step, then plans → implements → tests → reviews → reports, with up to N corrective rounds, and on PASS records the step in ${ARTIFACTS.currentState} and commits.`,
 			"Blocking: returns when the requested steps have passed, the plan is complete, or the loop halted. Halts are reported as errors with the reason; the step's artifacts and code stay in place and the next call resumes it.",
-			"Requires Full_Plan.md in the project root and a clean git tree (or the --duker-allow-dirty flag). Only one loop may run at a time.",
+			"Requires Full_Plan.md in the project root and a clean git tree (or the --duker-allow-dirty flag); the user prepares both with /duker init. Only one loop may run at a time.",
 		].join(" "),
 		promptSnippet: "Run the duker plan→implement→validate loop over Full_Plan.md steps",
 		promptGuidelines: [

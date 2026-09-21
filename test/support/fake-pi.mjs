@@ -1,7 +1,8 @@
 // A deterministic stand-in for the `pi` CLI used by the integration tests (DUKER_PI_BIN points
 // here). It plays the agent named by DUKER_AGENT: writes the artifacts a real agent would and
 // emits a minimal `--mode json` event stream on stdout. Behaviour is steered by FAKE_SCENARIO
-// (JSON): { testerFailures: {"<stepId>": n}, skipMilestone, crashAgent, errorAgent, noVerdict, reporterLies }.
+// (JSON): { testerFailures: {"<stepId>": n}, skipMilestone, crashAgent, errorAgent, noVerdict, reporterLies,
+// badDraft (plan-writer writes a draft without step ids), noDraft (plan-writer writes nothing) }.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -125,6 +126,33 @@ switch (agent) {
 			fs.writeFileSync(path.join(cwd, "Current_State.md"), `${cs.replace(/(## Milestones\n)/, `$1${m[1]}\n`)}\n## Layout\n- src/ has step files\n`);
 		}
 		say(m ? m[1] : "no milestone");
+		break;
+	}
+	case "plan-writer": {
+		// Converts the named document's list items (or the description's lines) into `- 1.n Title: text` steps.
+		const src = /convert the existing plan document `([^`]+)`/.exec(task)?.[1];
+		let items = src
+			? (load(src) ?? "")
+					.split("\n")
+					.filter((l) => /^\s*(?:[-*]|\d+[.)])\s+\S/.test(l))
+					.map((l) => l.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
+			: (task.split("Project description:")[1] ?? "")
+					.split("\n")
+					.map((l) => l.trim())
+					.filter(Boolean);
+		if (!items.length) items = ["Do something", "Do another thing"];
+		tool("read", { path: src ?? "README.md" });
+		if (scenario.noDraft) {
+			say("I could not produce a plan.");
+			break;
+		}
+		const steps = items.map((t, i) => `- 1.${i + 1} ${t.split(/[:.]/)[0].trim()}: ${t}. Done when: it exists.`).join("\n");
+		const body = scenario.badDraft
+			? "# Plan\n\nno numbered steps here\n"
+			: `# Demo — Full Plan\n\nConverted from ${src ?? "the description"}.\n\n## Phase 1 — Everything\n\n${steps}\n`;
+		tool("write", { path: "Full_Plan.draft.md" });
+		fs.writeFileSync(path.join(cwd, "Full_Plan.draft.md"), body);
+		say(`Wrote Full_Plan.draft.md: 1 phase, ${items.length} steps; nothing dropped.`);
 		break;
 	}
 	default:

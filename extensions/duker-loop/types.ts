@@ -78,6 +78,25 @@ export const TEMP_ARTIFACTS = [
 /** Extension-internal state and logs live here (relative to cwd). */
 export const DUKER_DIR = ".duker";
 
+/**
+ * /duker init: the plan-writer agent may not touch Full_Plan.md (GLOBAL_WRITE_DENY), so it
+ * writes this draft and code validates + moves it into place; a replaced plan is kept as the
+ * backup. Both are git-excluded.
+ */
+export const PLAN_DRAFT = "Full_Plan.draft.md";
+export const PLAN_BACKUP = "Full_Plan.md.bak";
+
+/** File names (case-insensitive, in cwd and docs/) that /duker init offers to convert into Full_Plan.md. */
+export const PLAN_CANDIDATE_NAMES = [
+	"PLAN.md",
+	"ROADMAP.md",
+	"PROJECT_PLAN.md",
+	"IMPLEMENTATION_PLAN.md",
+	"MILESTONES.md",
+	"BACKLOG.md",
+	"TODO.md",
+] as const;
+
 /** Paths no child may ever write, regardless of its own allowlist. */
 export const GLOBAL_WRITE_DENY = [ARTIFACTS.fullPlan, `${DUKER_DIR}/**`, ".git/**", ".pi/**"] as const;
 
@@ -140,6 +159,19 @@ export interface ParsedIssues {
 	notes: number;
 	/** lines that start like an entry but do not match the contract */
 	malformed: { line: number; text: string }[];
+}
+
+/** Result of the Full_Plan.md format check (/duker init, decision #33). */
+export interface PlanCheck {
+	/** true when the plan has enough dotted step ids for the orchestrator to work with */
+	ok: boolean;
+	/** step ids found, in file order (e.g. "1.1", "1.2", "2.1") */
+	ids: string[];
+	/** phase headings found (`## Phase 1 — …`, `# 2. …`, …) */
+	phases: number;
+	/** what is wrong; empty when ok (warnings may still be present) */
+	problems: string[];
+	warnings: string[];
 }
 
 export interface ParsedVerdict {

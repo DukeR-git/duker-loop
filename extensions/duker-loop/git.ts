@@ -20,6 +20,18 @@ async function git(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: 
 	}
 }
 
+/** Is a git executable on PATH at all? (init reports this separately from "not a repo".) */
+export async function gitAvailable(): Promise<boolean> {
+	const r = await git(process.cwd(), ["--version"]);
+	return r.ok;
+}
+
+/** `git init` in cwd. Returns the error text on failure. */
+export async function gitInit(cwd: string): Promise<{ error?: string }> {
+	const r = await git(cwd, ["init", "-q"]);
+	return r.ok ? {} : { error: r.stderr.trim() || "git init failed" };
+}
+
 export async function isGitRepo(cwd: string): Promise<boolean> {
 	const r = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
 	return r.ok && r.stdout.trim() === "true";
@@ -70,7 +82,18 @@ export async function ensureExcluded(cwd: string, pattern: string): Promise<bool
 
 /** Commits everything (except excluded paths). Returns the new sha, or undefined when nothing to commit. */
 export async function commitAll(cwd: string, message: string): Promise<{ sha?: string; error?: string }> {
-	const add = await git(cwd, ["add", "-A"]);
+	return commitStaged(cwd, ["add", "-A"], message);
+}
+
+/** Commits only the given paths (missing ones are skipped). Returns the new sha, or undefined when nothing to commit. */
+export async function commitPaths(cwd: string, paths: string[], message: string): Promise<{ sha?: string; error?: string }> {
+	const present = paths.filter((p) => fs.existsSync(path.join(cwd, p)));
+	if (!present.length) return {};
+	return commitStaged(cwd, ["add", "--", ...present], message);
+}
+
+async function commitStaged(cwd: string, addArgs: string[], message: string): Promise<{ sha?: string; error?: string }> {
+	const add = await git(cwd, addArgs);
 	if (!add.ok) return { error: add.stderr.trim() };
 	const staged = await git(cwd, ["diff", "--cached", "--quiet"]);
 	if (staged.ok) return {}; // exit 0 = no staged changes
