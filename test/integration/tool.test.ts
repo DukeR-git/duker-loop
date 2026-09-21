@@ -15,14 +15,16 @@ interface Registered {
 	commands: Record<string, { handler: AnyFn; getArgumentCompletions?: AnyFn }>;
 	flags: Record<string, { default?: unknown }>;
 	renderers: Record<string, AnyFn>;
+	shortcuts: Record<string, { description: string; handler: AnyFn }>;
 	entries: { type: string; data: any }[];
 }
-const reg: Registered = { tools: {}, commands: {}, flags: {}, renderers: {}, entries: [] };
+const reg: Registered = { tools: {}, commands: {}, flags: {}, renderers: {}, shortcuts: {}, entries: [] };
 const flagValues: Record<string, unknown> = { "duker-max-rounds": "2" };
 const pi = {
 	registerFlag: (n: string, o: { default?: unknown }) => (reg.flags[n] = o),
 	getFlag: (n: string) => flagValues[n] ?? reg.flags[n]?.default,
 	registerCommand: (n: string, o: any) => (reg.commands[n] = o),
+	registerShortcut: (k: string, o: any) => (reg.shortcuts[k] = o),
 	registerTool: (t: any) => (reg.tools[t.name] = t),
 	registerEntryRenderer: (t: string, r: AnyFn) => (reg.renderers[t] = r),
 	appendEntry: (type: string, data: any) => reg.entries.push({ type, data }),
@@ -221,6 +223,60 @@ test("command: init — usage, non-interactive report, interactive conversion th
 	ac.abort();
 	await assert.rejects(running, /aborted/);
 	await cmd.handler("clean", ctx(cwd));
+});
+
+test("command: watch + shortcut — no TUI → note; with a TUI the run feeds the list and watch opens the viewer", async () => {
+	const cwd = project();
+	useFakePi();
+	const cmd = reg.commands.duker;
+	assert.deepEqual(Object.keys(reg.shortcuts), ["ctrl+shift+d"]);
+	assert.match(reg.shortcuts["ctrl+shift+d"]!.description, /duker/);
+	assert.deepEqual(await cmd.getArgumentCompletions!("w"), [{ value: "watch", label: "watch" }]);
+
+	await cmd.handler("watch", ctx(cwd));
+	assert.match(reg.entries.at(-1)!.data.body, /needs the interactive TUI/);
+
+	// a ctx.ui with the fleet surface: widget, input hook, overlay
+	let widget: any;
+	let overlay: any;
+	const notifications: string[] = [];
+	const tui = { requestRender() {}, terminal: { rows: 30, columns: 100 } };
+	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+	const uiCtx = {
+		...ctx(cwd),
+		hasUI: true,
+		ui: {
+			setStatus() {},
+			notify: (t: string) => notifications.push(t),
+			setWidget: (_k: string, f: any) => (widget = f ? f(tui, theme) : undefined),
+			onTerminalInput: () => () => {},
+			getEditorText: () => "",
+			custom: (f: any) => new Promise((resolve) => (overlay = f(tui, theme, undefined, resolve))),
+		},
+	};
+	const widgetRows: string[] = [];
+	const poll = setInterval(() => {
+		for (const l of widget?.render(120) ?? []) if (/⏳/.test(l) && !widgetRows.includes(l.trim())) widgetRows.push(l.trim());
+	}, 5);
+	await cmd.handler("1", uiCtx);
+	clearInterval(poll);
+	assert.ok(widgetRows.some((l) => /SELECT +orchestrator/.test(l)), widgetRows.join("\n"));
+	assert.ok(widgetRows.some((l) => /IMPLEMENT +implementer/.test(l)), widgetRows.join("\n"));
+	assert.ok(widget, "list lingers after the run");
+	assert.match(widget.render(120)[2], /duker step 1\.1 — First .*steps-done/);
+
+	await reg.shortcuts["ctrl+shift+d"]!.handler(uiCtx);
+	assert.ok(overlay, "shortcut opened the viewer");
+	const view: string[] = overlay.render(100);
+	assert.match(view[1]!, /✓ state-updater PERSIST step 1\.1/);
+	overlay.handleInput("escape");
+	await new Promise((r) => setTimeout(r, 0));
+	overlay = undefined;
+	await cmd.handler("watch", uiCtx);
+	assert.ok(overlay, "/duker watch opened the viewer");
+	overlay.handleInput("q");
+	await new Promise((r) => setTimeout(r, 0));
+	assert.deepEqual(notifications.filter((n) => /no child has run/.test(n)), []);
 });
 
 test("entry renderer returns a Text component", () => {

@@ -5,6 +5,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import type { Activity } from "./activity.ts";
 import { type LoopOptions, type LoopSummary, type ProgressSink, runLoop } from "./loop.ts";
 import { type DukerDetails, formatPhase, formatStepLine, formatToolContent, renderCall, renderResult } from "./render.ts";
 import type { ChildUsage } from "./runtime.ts";
@@ -25,6 +26,10 @@ export interface ToolDeps {
 	registry: RunRegistry;
 	/** Builds LoopOptions minus cwd/steps/signal/sink from flags + ctx. */
 	baseOptions(ctx: ExtensionContext): Pick<LoopOptions, "maxRounds" | "maxCost" | "childTimeoutMinutes" | "allowDirty" | "inheritModel" | "inheritThinking">;
+	/** Live fleet-view model; the tool feeds it like the command does. */
+	activity?: Activity;
+	/** Lets the fleet view capture ctx.ui from a tool call (when the session started without one). */
+	attachUI?(ctx: ExtensionContext): void;
 }
 
 export function registerDukerTool(pi: ExtensionAPI, deps: ToolDeps): void {
@@ -56,18 +61,23 @@ export function registerDukerTool(pi: ExtensionAPI, deps: ToolDeps): void {
 			const details: DukerDetails = { cwd, steps, startedAt: new Date().toISOString(), notes: [], stepsDone: [] };
 			const snapshot = (): DukerDetails => ({ ...details, notes: [...details.notes], stepsDone: [...details.stepsDone], current: details.current ? { ...details.current } : undefined });
 			const emit = (text: string) => onUpdate?.({ content: [{ type: "text", text }], details: snapshot() });
-			const sink = makeToolSink(details, emit, ctx);
+			const sink: ProgressSink = { ...makeToolSink(details, emit, ctx), ...deps.activity?.hooks() };
 			const setStatus = (t: string | undefined) => ctx.hasUI && ctx.ui.setStatus("duker", t);
+			if (ctx.hasUI) deps.attachUI?.(ctx);
+			deps.activity?.startRun("loop", `duker_loop ${steps} step(s)`);
 
 			let summary: LoopSummary;
+			let outcome = "error";
 			try {
 				setStatus("duker ⏳ starting");
 				summary = await runLoop({ ...deps.baseOptions(ctx), cwd, steps, signal: controller.signal, sink });
+				outcome = summary.stopped;
 			} catch (err) {
 				const msg = (err as Error).message;
 				throw new Error(`${msg.startsWith("duker") ? "" : "duker: "}${msg}${details.notes.length ? `\n${details.notes.join("\n")}` : ""}`);
 			} finally {
 				deps.registry.release();
+				deps.activity?.endRun(outcome);
 				setStatus(undefined);
 			}
 

@@ -68,6 +68,9 @@ export type ChildEvent =
 	| { kind: "start"; agent: string; argv: string[] }
 	| { kind: "tool"; agent: string; toolName: string; args: Record<string, unknown> }
 	| { kind: "text"; agent: string; text: string }
+	/** streaming assistant text (message_update deltas) — for live viewers only */
+	| { kind: "textDelta"; agent: string; text: string }
+	| { kind: "toolEnd"; agent: string; toolName: string; isError: boolean; text: string }
 	| { kind: "retry"; agent: string; attempt: number; errorMessage: string }
 	| { kind: "stderr"; agent: string; line: string }
 	| { kind: "end"; agent: string; result: ChildResult };
@@ -253,6 +256,21 @@ export function messageText(msg: ChildMessage | undefined): string {
 		.trim();
 }
 
+/** Tool results in the JSON stream are a string, a content-part array, or `{ content: [...] }`. */
+const TOOL_RESULT_MAX_CHARS = 4000;
+export function toolResultText(result: unknown): string {
+	if (typeof result === "string") return result;
+	if (!result || typeof result !== "object") return "";
+	const parts = Array.isArray(result) ? result : (result as { content?: unknown }).content;
+	if (typeof parts === "string") return parts;
+	if (!Array.isArray(parts)) return "";
+	return parts
+		.filter((p): p is { type: "text"; text: string } => !!p && typeof p === "object" && (p as { type?: string }).type === "text" && typeof (p as { text?: unknown }).text === "string")
+		.map((p) => p.text)
+		.join("\n")
+		.trim();
+}
+
 export function lastAssistantText(messages: ChildMessage[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i]!;
@@ -425,12 +443,28 @@ export async function runChild(spec: ChildSpec): Promise<ChildResult> {
 						}
 						break;
 					}
+					case "message_update": {
+						const ame = ev.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
+						if (ame?.type === "text_delta" && typeof ame.delta === "string" && ame.delta) {
+							spec.onEvent?.({ kind: "textDelta", agent: a.name, text: ame.delta });
+						}
+						break;
+					}
 					case "tool_execution_start":
 						spec.onEvent?.({
 							kind: "tool",
 							agent: a.name,
 							toolName: String(ev.toolName ?? "?"),
 							args: (ev.args as Record<string, unknown>) ?? {},
+						});
+						break;
+					case "tool_execution_end":
+						spec.onEvent?.({
+							kind: "toolEnd",
+							agent: a.name,
+							toolName: String(ev.toolName ?? "?"),
+							isError: ev.isError === true,
+							text: toolResultText(ev.result).slice(0, TOOL_RESULT_MAX_CHARS),
 						});
 						break;
 					case "auto_retry_start":

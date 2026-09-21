@@ -11,11 +11,12 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ChildHooks, ChildInfo } from "./activity.ts";
 import { bundledAgentsDir, discoverAgents, findAgent } from "./agents.ts";
 import { artifactExists, artifactPath, checkPlanFormat, cleanTempArtifacts, ensureCurrentState, readArtifact } from "./artifacts.ts";
 import { changedFiles, commitAll, commitPaths, ensureExcluded, gitAvailable, gitHead, gitInit, isGitRepo } from "./git.ts";
 import { type PlanSource, planWriterPrompt } from "./prompts.ts";
-import { addUsage, type ChildUsage, emptyUsage, isFailedResult, resultErrorText, runChild } from "./runtime.ts";
+import { addUsage, ChildAbortedError, type ChildResult, type ChildUsage, emptyUsage, isFailedResult, resultErrorText, runChild } from "./runtime.ts";
 import { clearState, loadState, runsDir, statePath } from "./state.ts";
 import { ARTIFACTS, DUKER_DIR, PLAN_BACKUP, PLAN_CANDIDATE_NAMES, PLAN_DRAFT, TEMP_ARTIFACTS, type ThinkingLevel } from "./types.ts";
 
@@ -44,6 +45,8 @@ export interface InitOptions {
 	agentsDir?: string;
 	/** status-line text while the plan-writer runs */
 	onProgress?: (text: string) => void;
+	/** feeds the live fleet view while the plan-writer runs */
+	hooks?: ChildHooks;
 }
 
 export type InitStatus = "ok" | "done" | "warn" | "fail" | "skip";
@@ -323,24 +326,34 @@ async function writePlan(
 
 	const runId = `init-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 	const logPath = path.join(runsDir(cwd, runId), "1-plan-writer.jsonl");
+	const info: ChildInfo = { runId, phase: "init", round: 0, agent: planWriter.name, seq: 1, logPath };
 	const started = Date.now();
 	const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
 	opts.onProgress?.(`duker init · plan-writer ⏳ starting`);
-	const r = await runChild({
-		agent: planWriter,
-		task: planWriterPrompt(source),
-		cwd,
-		inheritModel: opts.inheritModel,
-		inheritThinking: opts.inheritThinking,
-		timeoutMinutes: opts.childTimeoutMinutes,
-		logPath,
-		signal: opts.signal,
-		extraEnv: { DUKER_RUN_ID: runId },
-		onEvent: (ev) => {
-			if (ev.kind === "tool") opts.onProgress?.(`duker init · plan-writer ⏳ ${elapsed()} · ${ev.toolName}`);
-			else if (ev.kind === "text") opts.onProgress?.(`duker init · plan-writer ⏳ ${elapsed()} · responding`);
-		},
-	});
+	opts.hooks?.childStart(info);
+	let r: ChildResult;
+	try {
+		r = await runChild({
+			agent: planWriter,
+			task: planWriterPrompt(source),
+			cwd,
+			inheritModel: opts.inheritModel,
+			inheritThinking: opts.inheritThinking,
+			timeoutMinutes: opts.childTimeoutMinutes,
+			logPath,
+			signal: opts.signal,
+			extraEnv: { DUKER_RUN_ID: runId },
+			onEvent: (ev) => {
+				if (ev.kind === "tool") opts.onProgress?.(`duker init · plan-writer ⏳ ${elapsed()} · ${ev.toolName}`);
+				else if (ev.kind === "text") opts.onProgress?.(`duker init · plan-writer ⏳ ${elapsed()} · responding`);
+				opts.hooks?.childEvent(info, ev);
+			},
+		});
+	} catch (err) {
+		opts.hooks?.childEnd(info, { ok: false, note: err instanceof ChildAbortedError ? "aborted" : (err as Error).message });
+		throw err;
+	}
+	opts.hooks?.childEnd(info, { ok: !isFailedResult(r), note: isFailedResult(r) ? resultErrorText(r) : undefined, usage: r.usage, guardBlocks: r.guardBlocks, finalText: r.finalText });
 	result.usage = addUsage(result.usage ?? emptyUsage(), r.usage);
 	result.planWriterSummary = r.finalText || undefined;
 	const log = path.relative(cwd, logPath);

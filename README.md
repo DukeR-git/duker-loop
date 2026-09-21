@@ -22,7 +22,8 @@ contracts and code-side cross-checks exist because small models drift.
 
 ## Requirements
 
-- pi ≥ 0.85 with at least one working model.
+- pi ≥ 0.85 with at least one working model (the fleet view needs `ctx.ui.onTerminalInput`, pi ≥ 0.84; on
+  an older pi everything else works and the list simply does not appear).
 - git on `PATH` (optional but recommended: per-step commits, diff-based review, dirty-tree protection).
 - Linux/macOS. Windows-native is untested (the child runtime relies on POSIX signals).
 - For `npm test`: Node ≥ 22.6 (uses `--experimental-strip-types`), no dependencies.
@@ -62,6 +63,7 @@ and leaves it alone. Then:
 
 ```
 /duker init [plan file]   prepare the project (see above); optional: the document to convert
+/duker watch      open the live view of the running child (also: ctrl+shift+d)
 /duker            run one Full_Plan step
 /duker 3          run up to three steps
 /duker status     show the current step / phase / round and which artifacts exist
@@ -70,6 +72,33 @@ and leaves it alone. Then:
 /duker agents     list the bundled agents and their settings
 /duker run <agent> <task…>   run one agent by hand (prompt tuning, debugging)
 ```
+
+### Watching the children
+
+While a run is in progress a list appears below the editor — the current step's phase chain,
+one row per agent:
+
+```
+  ← ↓ duker children · /duker watch
+  ● main  duker step 1.2 — Deliverable routing                              3m12s
+  ○ ✓ SELECT    orchestrator  done                       4s · 1 turns · ↓ 120 tokens
+  ○ ✓ PLAN      planner       done                    1m40s · 6 turns · ↓ 2.1k tokens
+  ○ ⏳ IMPLEMENT implementer   edit src/routing.py                          1m28s
+  ○ · TEST      tester        pending
+  ○ · REVIEW    reviewer      pending
+  ...
+```
+
+Press **↓ or ←** at an empty prompt to move into the list (exactly like pi-subagents' FleetView),
+**↑/↓** to select a row, **Enter** to open it, **Esc** (or ↑ past the top) to return to the
+prompt. Opening the running row shows a live overlay: header (agent, phase, step, elapsed,
+turns, tokens, cost, guard blocks) and a scrolling tail of its tool calls, tool results,
+streamed assistant text and stderr; it follows the tail until you scroll up (`end` re-follows),
+**Esc/q** closes it, **x x** aborts the whole run. A finished row opens the same view with the
+child's final message. `/duker watch` or **ctrl+shift+d** jump straight to the running child's
+view. Typing is never intercepted — the arrows only reach the list when the prompt is empty.
+`/duker run` and `/duker init`'s plan-writer show up in the same list. Everything shown is kept in
+memory for the current run only; the durable record is still `.duker/runs/<run id>/*.jsonl`.
 
 The same loop is available to the model as the **`duker_loop`** tool (`{ steps?, cwd? }`):
 "advance the plan by one step" makes it call the tool, block until the step passes / the plan
@@ -156,7 +185,7 @@ orchestrator       STEP: <id> | NONE | BLOCKED  /  TITLE:  /  DESCRIPTION:  /  R
 ## Development
 
 ```bash
-npm test                    # 58 tests: parsers, guard, state, /duker init, and the whole loop driven by a fake pi
+npm test                    # 71 tests: parsers, guard, state, /duker init, the fleet view, and the whole loop driven by a fake pi
 npm run test:unit           # just the parsers/guard/state tests
 npm run typecheck           # needs the pi packages resolvable (e.g. a node_modules with them)
 npm run typecheck:container # inside a container with pi installed globally and typescript/@types/node under ~/.npm-global

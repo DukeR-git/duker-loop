@@ -10,6 +10,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ChildHooks, ChildInfo } from "./activity.ts";
 import { bundledAgentsDir, discoverAgents, findAgent } from "./agents.ts";
 import {
 	artifactExists,
@@ -84,7 +85,8 @@ export interface PhaseInfo {
 	detail?: string;
 }
 
-export interface ProgressSink {
+/** Optional child-level hooks (start / raw events / end) feed the live fleet view. */
+export interface ProgressSink extends Partial<ChildHooks> {
 	phase(info: PhaseInfo): void;
 	note(level: "info" | "warning" | "error", text: string): void;
 	stepDone(step: StepSummary): void;
@@ -439,10 +441,12 @@ async function child(ctx: LoopCtx, state: LoopState, usage: ChildUsage, agentNam
 	const started = Date.now();
 	const seq = state.history.length + 1;
 	const logPath = path.join(runsDir(cwd, state.runId), `${String(seq).padStart(2, "0")}-${agentName}.jsonl`);
+	const info: ChildInfo = { runId: state.runId, stepId: state.stepId, title: state.title, phase: state.phase, round: state.round, agent: agentName, seq, logPath };
 	let detail: string | undefined;
 	const emit = () =>
 		sink.phase({ stepId: state.stepId, title: state.title, round: state.round, phase: state.phase, agent: agentName, elapsedMs: Date.now() - started, detail });
 	emit();
+	sink.childStart?.(info);
 	const ticker = setInterval(emit, 5000);
 
 	let result: ChildResult;
@@ -461,15 +465,26 @@ async function child(ctx: LoopCtx, state: LoopState, usage: ChildUsage, agentNam
 				if (ev.kind === "tool") detail = describeTool(ev.toolName, ev.args);
 				else if (ev.kind === "retry") detail = `retry ${ev.attempt}: ${ev.errorMessage.slice(0, 60)}`;
 				else if (ev.kind === "text") detail = "responding";
-				if (ev.kind !== "stderr") emit();
+				if (ev.kind !== "stderr" && ev.kind !== "textDelta" && ev.kind !== "toolEnd") emit();
+				sink.childEvent?.(info, ev);
 			},
 		});
+	} catch (err) {
+		sink.childEnd?.(info, { ok: false, note: err instanceof ChildAbortedError ? "aborted" : (err as Error).message });
+		throw err;
 	} finally {
 		clearInterval(ticker);
 	}
 
 	addUsage(usage, result.usage);
 	const failed = isFailedResult(result);
+	sink.childEnd?.(info, {
+		ok: !failed,
+		note: failed ? resultErrorText(result) : result.guardBlocks ? `${result.guardBlocks} guard block(s)` : undefined,
+		usage: result.usage,
+		guardBlocks: result.guardBlocks,
+		finalText: result.finalText,
+	});
 	recordPhase(state, {
 		phase: state.phase,
 		round: state.round,

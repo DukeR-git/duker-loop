@@ -6,8 +6,10 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import * as path from "node:path";
+import { Activity, type ChildInfo } from "./activity.ts";
 import { bundledAgentsDir, discoverAgents, findAgent, formatAgentList } from "./agents.ts";
 import { artifactExists, cleanTempArtifacts, parseIssues, parseVerdict, readArtifact } from "./artifacts.ts";
+import { DukerFleet, type FleetUI } from "./fleet.ts";
 import { formatInitResult, type InitPrompter, runInit } from "./init.ts";
 import { type ProgressSink, runLoop } from "./loop.ts";
 import { formatLoopSummary, formatPhase, formatStepLine } from "./render.ts";
@@ -18,6 +20,7 @@ import { ARTIFACTS, DUKER_DIR, TEMP_ARTIFACTS } from "./types.ts";
 
 const STATUS_KEY = "duker";
 const ENTRY_TYPE = "duker-note";
+const WATCH_SHORTCUT = "ctrl+shift+d";
 
 /** The one loop that may run per session (command or tool). */
 let activeRun: { controller: AbortController; startedAt: number; via: "command" | "tool" } | undefined;
@@ -33,6 +36,17 @@ const registry: RunRegistry = {
 	release() {
 		activeRun = undefined;
 	},
+};
+
+/** Live model of the current run's children + the fleet view over it (decision #34). */
+const activity = new Activity();
+const fleet = new DukerFleet(activity, () => {
+	if (!activeRun) return false;
+	activeRun.controller.abort();
+	return true;
+});
+const attachUI = (ctx: ExtensionContext) => {
+	if (ctx.hasUI) fleet.setUICtx(ctx.ui as unknown as FleetUI);
 };
 
 export default function (pi: ExtensionAPI) {
@@ -65,12 +79,17 @@ export default function (pi: ExtensionAPI) {
 		return new Text(`${title}\n${theme.fg("dim", data.body)}`, 0, 0);
 	});
 
-	registerDukerTool(pi, { registry, baseOptions: (ctx) => baseOptions(pi, ctx) });
+	registerDukerTool(pi, { registry, baseOptions: (ctx) => baseOptions(pi, ctx), activity, attachUI });
+
+	pi.registerShortcut(WATCH_SHORTCUT, {
+		description: "duker: open the live view of the running child",
+		handler: async (ctx) => cmdWatch(pi, ctx),
+	});
 
 	pi.registerCommand("duker", {
-		description: "Run the duker loop: /duker [n] | init [plan file] | status | clean | abort | agents | run <agent> <task>",
+		description: "Run the duker loop: /duker [n] | init [plan file] | watch | status | clean | abort | agents | run <agent> <task>",
 		getArgumentCompletions: (prefix) =>
-			["init", "agents", "run", "status", "clean", "abort"]
+			["init", "watch", "agents", "run", "status", "clean", "abort"]
 				.filter((s) => s.startsWith(prefix))
 				.map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -78,6 +97,8 @@ export default function (pi: ExtensionAPI) {
 			switch (sub) {
 				case "init":
 					return cmdInit(pi, ctx, rest);
+				case "watch":
+					return cmdWatch(pi, ctx);
 				case "agents":
 					return cmdAgents(pi, ctx);
 				case "run":
@@ -91,7 +112,7 @@ export default function (pi: ExtensionAPI) {
 				default: {
 					const n = sub === "" ? 1 : Number(sub);
 					if (!Number.isInteger(n) || n < 1 || rest.length) {
-						return note(pi, ctx, "duker", "usage: /duker [n] | init [plan file] | status | clean | abort | agents | run <agent> <task>");
+						return note(pi, ctx, "duker", "usage: /duker [n] | init [plan file] | watch | status | clean | abort | agents | run <agent> <task>");
 					}
 					return cmdLoop(pi, ctx, n);
 				}
@@ -101,11 +122,13 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+		attachUI(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
 		activeRun?.controller.abort();
 		killAllChildren();
+		fleet.dispose();
 	});
 }
 
@@ -129,11 +152,15 @@ async function cmdLoop(pi: ExtensionAPI, ctx: ExtensionCommandContext, steps: nu
 	const controller = new AbortController();
 	const busy = registry.acquire("command", controller);
 	if (busy) return note(pi, ctx, "duker", busy);
-	const sink = makeSink(pi, ctx);
+	const sink = { ...makeSink(pi, ctx), ...activity.hooks() };
 	const setStatus = (t: string | undefined) => ctx.hasUI && ctx.ui.setStatus(STATUS_KEY, t);
 	setStatus("duker ⏳ starting");
+	attachUI(ctx);
+	activity.startRun("loop", `duker ${steps} step(s)`);
+	let outcome = "error";
 	try {
 		const summary = await runLoop({ ...baseOptions(pi, ctx), cwd: ctx.cwd, steps, signal: controller.signal, sink });
+		outcome = summary.stopped;
 		const { title, body } = formatLoopSummary(summary, sink.notes);
 		note(pi, ctx, title, body);
 		if (ctx.hasUI) ctx.ui.notify(title, summary.stopped === "halted" ? "error" : summary.stopped === "aborted" ? "warning" : "info");
@@ -143,7 +170,20 @@ async function cmdLoop(pi: ExtensionAPI, ctx: ExtensionCommandContext, steps: nu
 		if (ctx.hasUI) ctx.ui.notify(`duker: ${msg}`, "error");
 	} finally {
 		registry.release();
+		activity.endRun(outcome);
 		setStatus(undefined);
+	}
+}
+
+/**
+ * Open the live viewer for the running child (or the last one of the current run). The same
+ * view is reachable from the list below the editor: ↓ or ← at an empty prompt, then Enter.
+ */
+function cmdWatch(pi: ExtensionAPI, ctx: ExtensionContext) {
+	if (!ctx.hasUI) return note(pi, ctx as ExtensionCommandContext, "duker watch", "needs the interactive TUI");
+	attachUI(ctx);
+	if (!fleet.openViewer()) {
+		ctx.ui.notify("duker: no child has run in this session yet — start /duker, /duker run or /duker init first", "info");
 	}
 }
 
@@ -225,6 +265,9 @@ async function cmdInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: str
 		: undefined;
 	const setStatus = (t: string | undefined) => ctx.hasUI && ctx.ui.setStatus(STATUS_KEY, t);
 	setStatus("duker init ⏳");
+	attachUI(ctx);
+	activity.startRun("init", "duker init");
+	let outcome = "error";
 	try {
 		const result = await runInit({
 			cwd: ctx.cwd,
@@ -235,18 +278,23 @@ async function cmdInit(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: str
 			childTimeoutMinutes: numberFlag(pi, "duker-child-timeout", 0),
 			signal: controller.signal,
 			onProgress: setStatus,
+			hooks: activity.hooks(),
 		});
+		outcome = result.ready ? "ready" : "not ready";
 		const title = result.ready ? "duker init — ready" : "duker init — not ready";
 		note(pi, ctx, title, formatInitResult(result));
 		if (ctx.hasUI) ctx.ui.notify(title, result.ready ? "info" : "warning");
 	} catch (err) {
-		if (err instanceof ChildAbortedError) note(pi, ctx, "duker init", "aborted while the plan-writer was running; nothing was replaced");
-		else {
+		if (err instanceof ChildAbortedError) {
+			outcome = "aborted";
+			note(pi, ctx, "duker init", "aborted while the plan-writer was running; nothing was replaced");
+		} else {
 			note(pi, ctx, "duker init: error", (err as Error).message);
 			if (ctx.hasUI) ctx.ui.notify(`duker init: ${(err as Error).message}`, "error");
 		}
 	} finally {
 		registry.release();
+		activity.endRun(outcome);
 		setStatus(undefined);
 	}
 }
@@ -280,6 +328,11 @@ async function cmdRun(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: stri
 	const started = Date.now();
 	const elapsed = () => `${Math.round((Date.now() - started) / 1000)}s`;
 	setStatus(`${agent.name} ⏳ starting`);
+	attachUI(ctx);
+	const info: ChildInfo = { runId, phase: "manual", round: 0, agent: agent.name, seq: 1, logPath };
+	activity.startRun("manual", `duker run ${agent.name}`);
+	activity.childStart(info);
+	let outcome = "error";
 	try {
 		const result = await runChild({
 			agent,
@@ -293,8 +346,12 @@ async function cmdRun(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: stri
 				if (ev.kind === "tool") setStatus(`${agent.name} ⏳ ${elapsed()} · ${ev.toolName}`);
 				else if (ev.kind === "text") setStatus(`${agent.name} ⏳ ${elapsed()} · thinking`);
 				else if (ev.kind === "retry") setStatus(`${agent.name} ⏳ ${elapsed()} · retry ${ev.attempt}`);
+				activity.childEvent(info, ev);
 			},
 		});
+		const failed = isFailedResult(result);
+		activity.childEnd(info, { ok: !failed, note: failed ? resultErrorText(result) : undefined, usage: result.usage, guardBlocks: result.guardBlocks, finalText: result.finalText });
+		outcome = failed ? "failed" : "done";
 		const u = result.usage;
 		const head = isFailedResult(result)
 			? `✗ duker run ${agent.name} failed: ${resultErrorText(result)}`
@@ -307,9 +364,11 @@ async function cmdRun(pi: ExtensionAPI, ctx: ExtensionCommandContext, rest: stri
 		].join("\n");
 		note(pi, ctx, head, body);
 	} catch (err) {
+		activity.childEnd(info, { ok: false, note: err instanceof ChildAbortedError ? "aborted" : (err as Error).message });
 		if (err instanceof ChildAbortedError) note(pi, ctx, `duker run ${agent.name}`, "aborted");
 		else note(pi, ctx, `duker run ${agent.name}`, `error: ${(err as Error).message}`);
 	} finally {
+		activity.endRun(outcome);
 		setStatus(undefined);
 	}
 }
