@@ -1,0 +1,13 @@
+node_modules/
+
+# duker-loop runtime state and child logs inside projects it runs on
+.duker/
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# temp
+*.tmp

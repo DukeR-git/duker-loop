@@ -1,0 +1,38 @@
+{
+  "name": "duker-loop",
+  "version": "0.1.0",
+  "description": "pi extension: deterministic plan → implement → test/review → report → persist loop driven by Full_Plan.md",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "subagents",
+    "orchestration"
+  ],
+  "files": [
+    "extensions/**/*.ts",
+    "child/**/*.ts",
+    "agents/*.md",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --import ./test/support/register.mjs --test \"test/**/*.test.ts\"",
+    "test:unit": "node --experimental-strip-types --test \"test/unit/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "typecheck:container": "tsc --noEmit -p tsconfig.container.json --typeRoots \"$HOME/.npm-global/lib/node_modules/@types\""
+  }
+}
